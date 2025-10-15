@@ -3,9 +3,6 @@
 !*/
 
 !*.py
-!*.pptx
-!*.pdf
 !*.md
-!*.zip
 
 !.gitignore

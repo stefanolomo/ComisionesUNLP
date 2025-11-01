@@ -16,13 +16,13 @@ HEADERS = {
 session = requests.Session()
 session.headers.update(HEADERS)
 
-# --- Funciones de Navegación ---
-# (Estas funciones son las mismas, no necesitan cambios)
+# --- Funciones de Navegación (con corrección de encoding) ---
 def obtener_periodos():
     print("1. Obteniendo la lista de periodos...")
     try:
         response = session.get(URL)
         response.raise_for_status()
+        response.encoding = 'utf-8' # <<< CORRECCIÓN
         soup = BeautifulSoup(response.text, 'lxml')
         selector = soup.find('select', {'name': 'anioSem'})
         if not selector: return None
@@ -39,6 +39,7 @@ def obtener_materias_por_periodo(periodo_value, periodo_texto):
         payload = {'anioSem': periodo_value}
         response = session.post(URL, data=payload, timeout=15)
         response.raise_for_status()
+        response.encoding = 'utf-8' # <<< CORRECCIÓN
         soup = BeautifulSoup(response.text, 'lxml')
         selector = soup.find('select', {'name': 'cod'})
         if not selector: return None
@@ -49,41 +50,35 @@ def obtener_materias_por_periodo(periodo_value, periodo_texto):
         print(f"  -> ERROR al obtener materias para {periodo_value}: {e}")
         return None
 
-# --- Función "Worker" para el Censo Multihilo ---
-
+# --- Función "Worker" (con corrección de encoding) ---
 def worker_get_docentes_for_materia(params):
     """
     Función trabajadora que procesa UNA materia: obtiene su lista de docentes y la guarda en el CSV.
     """
     periodo_value, periodo_texto, materia_value, materia_texto, csv_writer, lock = params
-
     print(f"    [Thread] Procesando materia: '{materia_texto}'")
-
     try:
         payload = {'anioSem': periodo_value, 'cod': materia_value}
         # Usamos requests.post para que cada hilo maneje su propia conexión
         response = requests.post(URL, headers=HEADERS, data=payload, timeout=15)
         response.raise_for_status()
+        response.encoding = 'utf-8' # <<< CORRECCIÓN
         soup = BeautifulSoup(response.text, 'lxml')
-
         selector_docente = soup.find('select', {'name': 'docente'})
         if not selector_docente:
             return
-
         info_docentes_materia = []
         opciones_docente = selector_docente.find_all('option')[1:]
-
         for option in opciones_docente:
             value = option.get('value')
             if not value:
                 continue
-
-            nombre, rango = value, "No especificado"
-            if '(' in value and ')' in value:
-                partes = value.split('(')
-                nombre = partes[0].strip()
-                rango = partes[1].replace(')', '').strip()
-
+            nombre, rango = value.strip(), "No especificado"
+            if value.strip().endswith(')'):
+                partes = value.strip().rsplit('(', 1)
+                if len(partes) == 2:
+                    nombre = partes[0].strip()
+                    rango = partes[1][:-1].strip()
             info_docentes_materia.append({
                 'periodo': periodo_texto,
                 'materia_codigo': materia_value,
@@ -91,47 +86,43 @@ def worker_get_docentes_for_materia(params):
                 'docente_nombre': nombre,
                 'docente_rango': rango
             })
-
         if info_docentes_materia:
             # Usamos el Lock para escribir de forma segura en el archivo
             with lock:
                 csv_writer.writerows(info_docentes_materia)
             print(f"    [Thread] ¡Éxito! Guardados {len(info_docentes_materia)} docentes de '{materia_texto}'")
-
     except requests.exceptions.RequestException as e:
         print(f"    [Thread] ERROR al procesar materia '{materia_texto}': {e}")
-
-    # Pausa respetuosa dentro del hilo
     time.sleep(0.5)
 
-# --- Orquestador Principal Multihilo ---
-
+# --- Orquestador Principal Multihilo (con corrección de encabezado y encoding) ---
 if __name__ == "__main__":
-
     NOMBRE_ARCHIVO = 'censo_docentes_multihilo.csv'
     FIELDNAMES = [
         'periodo', 'materia_codigo', 'materia_nombre',
         'docente_nombre', 'docente_rango'
     ]
-    MAX_WORKERS = 30 # Aumenta o disminuye según tu conexión y la respuesta del servidor
-
+    MAX_WORKERS = 30
     csv_lock = threading.Lock()
-    file_exists = os.path.isfile(NOMBRE_ARCHIVO)
 
-    with open(NOMBRE_ARCHIVO, 'a', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=FIELDNAMES)
-        if not file_exists:
+    # <<< CORRECCIÓN: Lógica de escritura del encabezado más robusta >>>
+    # El encabezado se escribirá solo si el archivo no existe o está completamente vacío.
+    escribir_encabezado = not (os.path.isfile(NOMBRE_ARCHIVO) and os.path.getsize(NOMBRE_ARCHIVO) > 0)
+
+    # <<< CORRECCIÓN: Usar 'utf-8-sig' y QUOTE_ALL para máxima compatibilidad y consistencia >>>
+    with open(NOMBRE_ARCHIVO, 'a', newline='', encoding='utf-8-sig') as csvfile:
+        writer = csv.DictWriter(csvfile, fieldnames=FIELDNAMES, quoting=csv.QUOTE_ALL)
+
+        if escribir_encabezado:
             writer.writeheader()
 
         periodos = obtener_periodos()
         if not periodos:
             exit()
-
         for periodo_value, periodo_texto in periodos.items():
             materias = obtener_materias_por_periodo(periodo_value, periodo_texto)
             if not materias:
                 continue
-
             print(f"\n---> Iniciando censo en paralelo para {len(materias)} materias de '{periodo_texto}' con {MAX_WORKERS} hilos...")
 
             # Preparamos la lista de tareas para el pool de hilos
@@ -139,10 +130,7 @@ if __name__ == "__main__":
                 (periodo_value, periodo_texto, mat_val, mat_txt, writer, csv_lock)
                 for mat_val, mat_txt in materias.items()
             ]
-
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 executor.map(worker_get_docentes_for_materia, tasks)
-
             print(f"---> Finalizado el censo para el periodo '{periodo_texto}'.\n")
-
     print("\n¡Censo de docentes multihilo completado!")

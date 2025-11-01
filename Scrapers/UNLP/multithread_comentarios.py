@@ -41,48 +41,39 @@ def obtener_materias_por_periodo(periodo_value, periodos_dict):
         soup = BeautifulSoup(response.text, 'lxml')
         selector_materia = soup.find('select', {'name': 'cod'})
         if not selector_materia: return None
-        materias = {opt.get('value'): opt.text.strip() for opt in selector_materia.find_all('option')[1:] if opt.get('value')}
+        # Limpiamos el texto de la materia para quitar el conteo de respuestas
+        materias = {}
+        for opt in selector_materia.find_all('option')[1:]:
+            if opt.get('value'):
+                # Parte el texto en el primer '(' y toma la primera parte
+                texto_limpio = opt.text.strip().split('(')[0].strip()
+                materias[opt.get('value')] = texto_limpio
         print(f"  -> Encontradas {len(materias)} materias.")
         return materias
     except requests.exceptions.RequestException as e:
         print(f"  -> ERROR al obtener materias para {periodo_value}: {e}")
         return None
 
-# --- WORKER DE COMENTARIOS (VERSIÓN CORREGIDA) ---
+# --- Worker de Comentarios (versión robusta con ID) ---
 
 def worker_scrape_comentarios(params):
-    """
-    Worker corregido para extraer comentarios, basándose en el ID de la tabla,
-    que es un selector mucho más robusto.
-    """
     periodo_value, materia_value, materia_texto, periodos_dict, csv_writer, lock = params
 
     print(f"    [Thread] Iniciando scraping de comentarios para: '{materia_texto}'")
-
     try:
         payload = {'anioSem': periodo_value, 'cod': materia_value}
         response = requests.post(URL, headers=HEADERS, data=payload, timeout=20)
         response.raise_for_status()
         soup = BeautifulSoup(response.text, 'lxml')
-
         resultados_comentarios = []
-
-        # 1. (CORREGIDO) Buscar la tabla directamente por su ID. Es el método más fiable.
         tabla = soup.find('table', id='tblComent')
-
         if not tabla:
-            # Si no se encuentra la tabla, no hay comentarios para esta materia.
-            # print(f"    [Thread] No se encontró tabla de comentarios (id='tblComent') para '{materia_texto}'.")
             return
-
-        # 2. Iterar sobre cada fila (<tr>) del cuerpo de la tabla (<tbody>)
-        # BeautifulSoup es inteligente y encontrará el tbody aunque no lo especifiquemos.
-        for fila in tabla.find_all('tr')[1:]: # Omitimos la fila de encabezado
+        for fila in tabla.find_all('tr')[1:]:
             celdas = fila.find_all('td')
             if len(celdas) == 2:
                 comision = celdas[0].text.strip()
                 comentario = celdas[1].text.strip()
-
                 if comentario:
                     resultados_comentarios.append({
                         'periodo': periodos_dict.get(periodo_value),
@@ -91,32 +82,28 @@ def worker_scrape_comentarios(params):
                         'comision': comision,
                         'comentario': comentario
                     })
-
         if resultados_comentarios:
             with lock:
                 csv_writer.writerows(resultados_comentarios)
             print(f"    [Thread] ¡Éxito! Guardados {len(resultados_comentarios)} comentarios para '{materia_texto}'")
-
     except requests.exceptions.RequestException as e:
         print(f"    [Thread] ERROR procesando comentarios de '{materia_texto}': {e}")
-
     time.sleep(0.5)
 
-# --- Orquestador Principal (sin cambios) ---
+# --- Orquestador Principal (con la corrección de entrecomillado) ---
 
 if __name__ == "__main__":
     NOMBRE_ARCHIVO = 'comentarios_encuestas.csv'
-    FIELDNAMES = [
-        'periodo', 'materia_codigo', 'materia_nombre',
-        'comision', 'comentario'
-    ]
+    FIELDNAMES = ['periodo', 'materia_codigo', 'materia_nombre', 'comision', 'comentario']
     MAX_WORKERS = 10
 
     csv_lock = threading.Lock()
     file_exists = os.path.isfile(NOMBRE_ARCHIVO)
 
     with open(NOMBRE_ARCHIVO, 'a', newline='', encoding='utf-8') as csvfile:
-        writer = csv.DictWriter(csvfile, fieldnames=FIELDNAMES)
+        # <<< LÍNEA MODIFICADA: Se añade quoting=csv.QUOTE_ALL
+        writer = csv.DictWriter(csvfile, fieldnames=FIELDNAMES, quoting=csv.QUOTE_ALL)
+
         if not file_exists:
             writer.writeheader()
 
@@ -130,15 +117,12 @@ if __name__ == "__main__":
                 continue
 
             print(f"\n---> Iniciando scraping en paralelo para {len(materias)} materias de '{periodo_texto}' con {MAX_WORKERS} hilos...")
-
             tasks = [
                 (periodo_value, mat_val, mat_txt, periodos, writer, csv_lock)
                 for mat_val, mat_txt in materias.items()
             ]
-
             with concurrent.futures.ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
                 executor.map(worker_scrape_comentarios, tasks)
-
             print(f"---> Finalizado el scraping de comentarios para el periodo '{periodo_texto}'.\n")
 
     print("\n¡Proceso de scraping de comentarios completado!")

@@ -3,6 +3,6 @@
 !*/
 
 !*.py
-!*.md
+*.md
 
 !.gitignore
